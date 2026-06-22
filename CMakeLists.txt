@@ -6,6 +6,16 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15)
 
 project(simc LANGUAGES CXX)
 
+# WASM build: force the browser-friendly configuration before the options below
+# are cached. Browser target builds only the engine/ CLI, with no Qt and no
+# networking, but keeps real threads (browser pthreads). See wasm/ + WASM_REPO_PLAN.md.
+if(EMSCRIPTEN)
+  set(BUILD_GUI        OFF CACHE BOOL "" FORCE)  # no Qt in the browser
+  set(SC_NO_NETWORKING ON  CACHE BOOL "" FORCE)  # no curl/wininet; Armory import not in v1
+  set(SC_NO_THREADING  OFF CACHE BOOL "" FORCE)  # keep real threads (pthreads)
+  set(BUILD_TESTING    OFF CACHE BOOL "" FORCE)  # CTest harness replaced by Node smoke + CI diff
+endif()
+
 # switch on/off different build targets
 option(BUILD_GUI "Build the Qt gui along with cli binary" ON)
 
@@ -42,6 +52,13 @@ endif()
 
 # output a compile_commands.json used for editor tooling
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# WASM build: apply the Emscripten compile/link flags globally (engine + simc)
+# before any target is defined. Kept in wasm/emscripten.cmake to minimize the
+# in-place delta against upstream.
+if(EMSCRIPTEN)
+  include(${PROJECT_SOURCE_DIR}/wasm/emscripten.cmake)
+endif()
 
 function(sc_common_compiler_options target)
   target_compile_options(${target} PRIVATE
