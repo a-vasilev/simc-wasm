@@ -1,0 +1,9 @@
+# Tiny smoke-test profile for the WASM build.
+#
+# Goal: a fast, deterministic sim that yields DPS > 0 -- this proves the
+# end-to-end path (MEMFS in -> main() -> json2 out), NOT accuracy. A naked
+# level-80 caster still casts its default APL off base Intellect, so DPS > 0.
+mage="WasmSmoke"
+level=80
+race=troll
+spec=frost
