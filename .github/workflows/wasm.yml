@@ -1,0 +1,166 @@
+name: wasm
+
+# Builds the threaded/SIMD simc.wasm artifact, validates it against native simc,
+# and publishes a GitHub Release on a v* tag. See WASM_REPO_PLAN.md sections 6-7.
+#
+# - push to `wasm`        -> build + validation diff (CI gate, no release)
+# - push tag `v*`         -> build + publish Release (validation is SKIPPED: the
+#                            tag points at a commit already validated on `wasm`,
+#                            so re-running the diff would just waste time)
+# - workflow_dispatch     -> manual build + validation diff
+on:
+  push:
+    branches: [wasm]
+    tags: ['v*']
+  pull_request:
+    branches: [wasm]
+  workflow_dispatch:
+
+env:
+  EMSDK_VERSION: "6.0.0"   # keep in sync with wasm/README.md (open item O5)
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Job A — build the wasm artifact
+  # --------------------------------------------------------------------------
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for the git-rev compile define
+
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: emsdk-cache
+
+      - name: Build (emcmake + ninja)
+        run: bash wasm/build.sh
+
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: simc-wasm
+          path: |
+            wasm/dist/simc.js
+            wasm/dist/simc.wasm
+            wasm/dist/simc.worker.js
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Job B — validation diff vs native simc (the regression guard)
+  # --------------------------------------------------------------------------
+  validate:
+    runs-on: ubuntu-latest
+    needs: build
+    # Skip on tag pushes: a v* tag points at a commit already validated by this
+    # same job when it was pushed to `wasm`. Re-validating is redundant.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    env:
+      PROFILE: profiles/CI.simc
+      # High iteration count -> tight Monte Carlo error bars so the statistical
+      # comparison stays sensitive to real regressions. threads=4 must stay <=
+      # PTHREAD_POOL_SIZE (8): without PROXY_TO_PTHREAD the host thread blocks in
+      # callMain, so simc must reuse pre-spawned pool workers, not create new
+      # ones on demand. (Also exercises multicore.) No seed/deterministic: the
+      # comparison is statistical, not bit-identical. (plan O3/O4)
+      SIM_ARGS: "iterations=1000 threads=4 single_actor_batch=1"
+      Z_MAX: "5"           # z-test threshold in compare-dps.mjs (open item O4)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Build native simc (same feature config as wasm)
+        run: |
+          cmake -G Ninja -S . -B build-native \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_GUI=OFF -DSC_NO_NETWORKING=ON -DBUILD_TESTING=OFF
+          cmake --build build-native --target simc
+
+      - name: Download wasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: simc-wasm
+          path: wasm/dist
+
+      - name: Run native simc
+        run: ./build-native/simc ${{ env.PROFILE }} ${{ env.SIM_ARGS }} json2=native.json
+
+      - name: Run wasm simc (Node)
+        run: node wasm/ci/run_wasm.mjs wasm/dist/simc.js ${{ env.PROFILE }} wasm.json ${{ env.SIM_ARGS }}
+
+      - name: Compare DPS (fail if outside tolerance)
+        run: node wasm/ci/compare-dps.mjs native.json wasm.json
+
+  # --------------------------------------------------------------------------
+  # Job C — publish Release (only on a v* tag, after build is green)
+  # --------------------------------------------------------------------------
+  # Validation is not a dependency here: it runs as the gate on the `wasm` branch
+  # push, and the tag points at that same already-validated commit.
+  release:
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download wasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: simc-wasm
+          path: dist
+
+      - name: Build manifest.json
+        run: |
+          BASE_SHA="$(cat wasm/BASE_SHA)"
+          SC_MAJOR="$(grep -oP 'SC_MAJOR_VERSION\s+"\K[^"]+' engine/config.hpp)"
+          SC_MINOR="$(grep -oP 'SC_MINOR_VERSION\s+"\K[^"]+' engine/config.hpp)"
+          {
+            echo '{'
+            echo "  \"release_tag\": \"${GITHUB_REF_NAME}\","
+            echo "  \"sc_version\": \"${SC_MAJOR}-${SC_MINOR}\","
+            echo "  \"upstream_base_sha\": \"${BASE_SHA}\","
+            echo "  \"emsdk_version\": \"${EMSDK_VERSION}\","
+            echo "  \"build_flags\": \"-pthread -msimd128 -fwasm-exceptions -O3 -sPROXY_TO_PTHREAD -sMODULARIZE -sEXPORT_ES6\","
+            echo "  \"files\": {"
+            first=1
+            for f in dist/simc.js dist/simc.wasm dist/simc.worker.js; do
+              [ -f "$f" ] || continue
+              [ $first -eq 0 ] && echo ","
+              first=0
+              printf '    "%s": "sha256:%s"' "$(basename "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+            done
+            echo ""
+            echo "  }"
+            echo '}'
+          } > dist/manifest.json
+          cat dist/manifest.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: |
+            dist/simc.js
+            dist/simc.wasm
+            dist/simc.worker.js
+            dist/manifest.json
+          fail_on_unmatched_files: false
+          body: |
+            Threaded/SIMD WebAssembly build of simc.
+
+            See `manifest.json` for the upstream base SHA, `SC_VERSION`, emsdk
+            version, build flags, and file hashes. Consumed by the `web` repo via
+            `import createSimc from 'simc.js'` in a Web Worker.
