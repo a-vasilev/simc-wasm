@@ -1,0 +1,6 @@
+# Re-include our build include, which the root .gitignore's *.cmake would hide
+!emscripten.cmake
+
+# Local build + artifact output (produced by build.sh / CI)
+build/
+dist/
