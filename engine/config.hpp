@@ -28,7 +28,10 @@
 #  ifndef UNICODE
 #    define UNICODE
 #  endif
-#else
+#elif !defined( __EMSCRIPTEN__ )
+// POSIX sigaction-based crash/interrupt handler. Disabled under Emscripten:
+// the browser/wasm runtime delivers no POSIX signals, so the handler is dead
+// code there and sc_main.cpp falls back to its empty handler stub.
 #  define SC_SIGACTION
 #endif
 
