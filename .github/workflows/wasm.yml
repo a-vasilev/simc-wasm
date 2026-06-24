@@ -170,3 +170,28 @@ jobs:
             See `manifest.json` for the upstream base SHA, `SC_VERSION`, emsdk
             version, build flags, and file hashes. Consumed by the `web` repo via
             `import createSimc from 'simc.js'` in a Web Worker.
+
+  # --------------------------------------------------------------------------
+  # Job D — notify the web repo to bump the engine (only after a Release)
+  # --------------------------------------------------------------------------
+  # Fires a repository_dispatch into the wow-freesim web repo so it can pick up
+  # the new engine build. Requires a PAT (the default GITHUB_TOKEN cannot reach
+  # another repo) stored as the WEB_REPO_DISPATCH_TOKEN secret in this fork:
+  # fine-grained, scoped to wow-freesim with Contents: read & write + Metadata:
+  # read, or a classic token with `repo`.
+  #
+  # This workflow publishes the release on a tag push, so the tag comes from
+  # github.ref_name (there is no `release` event payload). The web workflow
+  # re-validates the tag (must be vNNNN.NN) and aborts on a bad value.
+  notify-web:
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Notify wow-freesim to bump the engine
+        env:
+          GH_TOKEN: ${{ secrets.WEB_REPO_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/a-vasilev/wow-freesim/dispatches \
+            -f event_type=engine-release \
+            -F client_payload[tag]="${GITHUB_REF_NAME}"
